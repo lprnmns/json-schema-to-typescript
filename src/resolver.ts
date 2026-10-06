@@ -72,6 +72,7 @@ export async function dereference(
     }
     resolve = {...resolve, set: inMemory}
   }
+  const needsDataExclusion = hasLiteralRefData(schema)
   const excludeDataPath = (path: string) => isDataPath(schema, path)
   // `resolve` and `parse` settings only concern other files; any other option can change what
   // $RefParser does. A member of a file set goes to $RefParser too: it is registered there under
@@ -91,13 +92,17 @@ export async function dereference(
         ...$refOptions,
         mutateInputSchema: true, // `schema` is this module's own copy already
         resolve,
-        resolveExcludedPathMatcher: (path: string, value?: unknown) =>
-          excludeDataPath(path) || ($refOptions.resolveExcludedPathMatcher?.(path, value) ?? false),
+        ...(needsDataExclusion && {
+          resolveExcludedPathMatcher: (path: string, value?: unknown) =>
+            excludeDataPath(path) || ($refOptions.resolveExcludedPathMatcher?.(path, value) ?? false),
+        }),
         parse: prenormalizingParsers($refOptions.parse, (document, file) => documents.hide(prepare(document, file))),
         dereference: {
           ...$refOptions.dereference,
-          excludedPathMatcher: (path: string, value?: unknown) =>
-            excludeDataPath(path) || ($refOptions.dereference?.excludedPathMatcher?.(path, value) ?? false),
+          ...(needsDataExclusion && {
+            excludedPathMatcher: (path: string, value?: unknown) =>
+              excludeDataPath(path) || ($refOptions.dereference?.excludedPathMatcher?.(path, value) ?? false),
+          }),
           onDereference,
         },
       },
@@ -474,6 +479,39 @@ function childSchemaContext(schemaNode: boolean, key: string, value: unknown): b
     return false
   }
   return true
+}
+
+/** Most schemas have no literal `$ref` data; keep the ref-parser's fast resolve path for them. */
+function hasLiteralRefData(root: JSONSchema): boolean {
+  const schemas = new WeakSet<object>()
+  const data = new WeakSet<object>()
+  function containsRef(value: unknown): boolean {
+    if (value === null || typeof value !== 'object' || data.has(value)) {
+      return false
+    }
+    data.add(value)
+    return isRef(value) || Object.values(value).some(containsRef)
+  }
+  function scan(node: unknown, schemaNode = true): boolean {
+    if (node === null || typeof node !== 'object' || schemas.has(node)) {
+      return false
+    }
+    schemas.add(node)
+    for (const [key, value] of Object.entries(node)) {
+      if (schemaNode && JSON_DATA_KEYWORDS.has(key)) {
+        if (containsRef(value)) {
+          return true
+        }
+      } else {
+        const context = childSchemaContext(schemaNode, key, value)
+        if (context !== undefined && scan(value, context)) {
+          return true
+        }
+      }
+    }
+    return false
+  }
+  return scan(root)
 }
 
 function isDataPath(root: JSONSchema, path: string): boolean {
